@@ -4,6 +4,38 @@ import neurokit2 as nk
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
 from tempfile import NamedTemporaryFile
+import pickle
+from tensorflow.keras.models import load_model
+import wfdb
+from tempfile import TemporaryDirectory
+import os
+
+st.set_page_config(
+        page_title="Analizador ECG",
+        page_icon="❤️",
+        layout="wide",
+        menu_items={
+            "About": "Visualizador de ECG con detección de picos R y cálculo de frecuencia cardíaca.",
+        },
+    )
+def load_ecg_model(model_upl, map_upl):
+    # 1) Write the uploaded model .h5 to disk
+    with NamedTemporaryFile(delete=False, suffix=".h5") as tmp_mod:
+        tmp_mod.write(model_upl.read())
+        model_path = tmp_mod.name
+
+    # 2) Write the uploaded label map .pkl to disk
+    with NamedTemporaryFile(delete=False, suffix=".pkl") as tmp_map:
+        tmp_map.write(map_upl.read())
+        map_path = tmp_map.name
+
+    # 3) Load from those temporary files
+    model = load_model(model_path)
+    with open(map_path, "rb") as f:
+        label_to_index = pickle.load(f)
+
+    index_to_label = {v: k for k, v in label_to_index.items()}
+    return model, index_to_label
 
 def calculate_heart_rate(signal, sampling_rate):
     """
@@ -17,6 +49,7 @@ def calculate_heart_rate(signal, sampling_rate):
     heart_rate = 60 / rr_intervals.mean() if rr_intervals.size else np.nan
     return heart_rate, r_peaks
 
+ 
 def graficos(uploaded_hea, uploaded_mat):
     """
     1) Parse sampling_rate from .hea  
@@ -25,6 +58,9 @@ def graficos(uploaded_hea, uploaded_mat):
     """
     if not (uploaded_hea and uploaded_mat):
         return
+    
+    uploaded_hea.seek(0)
+    uploaded_mat.seek(0)
 
     try:
         # — Save uploads to temp files —
@@ -90,19 +126,8 @@ def graficos(uploaded_hea, uploaded_mat):
         st.error(f"Error al procesar ECG: {e}")
         st.stop()
 
-
-# ——— Main App ———
-
 def main():
-    st.set_page_config(
-        page_title="Analizador ECG",
-        page_icon="❤️",
-        layout="wide",
-        menu_items={
-            "About": "Visualizador de ECG con detección de picos R y cálculo de frecuencia cardíaca.",
-        },
-    )
-
+    
     st.title("📈 ECG Dashboard")
     st.markdown(
         """
@@ -113,11 +138,71 @@ def main():
     )
 
     with st.sidebar:
-        st.header("Sube tus archivos")
-        hea = st.file_uploader("Archivo header (.hea)", type="hea")
-        mat = st.file_uploader("Datos (.mat)", type="mat")
+        st.header("1) Modelo y mapeo de etiquetas")
+        model_upl    = st.file_uploader("Modelo Keras (.h5)", type=["h5"])
+        map_upl         = st.file_uploader("Label map (.pkl)", type=["pkl"])
+        st.header("2) Señal WFD")
+        hea_upl = st.file_uploader("Archivo header (.hea)", type="hea")
+        mat_upl = st.file_uploader("Datos (.mat)", type="mat")
+        st.caption("Debe subir ambos .hea + .dat del mismo record")
 
-    graficos(hea, mat)
+    if hea_upl and mat_upl:
+        hea_upl.seek(0)
+        mat_upl.seek(0)
+        graficos(hea_upl, mat_upl)
+    else:
+        st.info("Sube primero tu header (.hea) y datos (.mat) para ver la señal.")
+
+    if model_upl and map_upl and hea_upl and mat_upl:
+        try:
+            
+            with NamedTemporaryFile(delete=False, suffix=".h5") as t:
+                t.write(model_upl.read())
+                model_path = t.name
+            with NamedTemporaryFile(delete=False, suffix=".pkl") as t2:
+                t2.write(map_upl.read())
+                map_path = t2.name
+            model = load_model(model_path)
+            with open(map_path, "rb") as f:
+                label_to_index = pickle.load(f)
+            index_to_label = {v:k for k,v in label_to_index.items()}
+
+            # 2) Save WFDB files into a temp folder with the same prefix
+            with TemporaryDirectory() as tmpdir:
+                prefix = os.path.join(tmpdir, "ecg_record")
+                # write .hea and .dat
+                open(prefix + ".hea", "wb").write(hea_upl.read())
+                open(prefix + ".mat", "wb").write(mat_upl.read())
+
+                # 3) Read the record
+                record = wfdb.rdrecord(prefix)
+                ecg = record.p_signal[:, 0]  # lead 0
+
+            # 4) Plot the raw ECG
+            st.subheader("📈 Señal ECG (lead 0)")
+            fig, ax = plt.subplots(figsize=(8,2))
+            times = np.arange(len(ecg)) / record.fs
+            ax.plot(times, ecg)
+            ax.set(xlabel="Tiempo (s)", ylabel="Amplitud (mV)")
+            st.pyplot(fig)
+
+            # 5) Prepare sample and predict
+            sample = ecg[np.newaxis, ..., np.newaxis].astype(np.float32)
+            pred_probs = model.predict(sample)[0]
+            pred_idx   = np.argmax(pred_probs)
+            pred_label = index_to_label[pred_idx]
+            pred_conf  = pred_probs[pred_idx]
+
+            # 6) Show result
+            st.subheader("📊 Resultado de clasificación")
+            st.markdown(f"**Clase:** {pred_label}  \n**Confianza:** {pred_conf:.2%}")
+
+        except Exception as e:
+            st.error(f"❌ Ocurrió un error: {e}")
+
+    else:
+        if not (model_upl and map_upl):
+            st.info("Sube tu modelo (.h5) y tu mapeo de etiquetas (.pkl) para clasificar.")
 
 
 if __name__ == "__main__":
