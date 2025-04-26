@@ -4,3 +4,4 @@ streamlit==1.44.1
 scipy==1.15.2
 matplotlib==3.10.1
 wfdb==4.3.0
+tensorflow==2.19.0
